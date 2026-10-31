@@ -10,13 +10,15 @@
   python turn_window.py <person> <group> --turn N        # 打印第N回合完整窗口(带文本)
 """
 import argparse, sys, os
+from contextlib import closing
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import connect
 
 def load(db_path, group):
-    db = connect(db_path)
-    return db.execute("SELECT sender_full, text, ts_iso, ts_ms, sid FROM wx_messages "
-                      "WHERE chat_raw=? ORDER BY ts_ms, sq", (group,)).fetchall()
+    with closing(connect(db_path)) as db:
+        return db.execute("SELECT sender_full, text, ts_iso, ts_ms, sid, quote_svrid "
+                          "FROM wx_messages WHERE chat_raw=? ORDER BY ts_ms, sq",
+                          (group,)).fetchall()
 
 def bursts(rows):
     """发言块: [sender, start, end]"""
@@ -46,16 +48,16 @@ def quote_anchor_dist(rows, idx):
     import re
     x = rows[idx][1]
     if not x.startswith('[引用消息]'): return None
-    sid = rows[idx][4]
-    if not sid: return None
-    for j in range(idx-1, max(0, idx-35), -1):
-        if rows[j][4] == sid:   # svrid 精确匹配
-            return idx - j
+    quote_svrid = rows[idx][5]
+    if quote_svrid:
+        for j in range(idx-1, max(-1, idx-36), -1):
+            if rows[j][4] == quote_svrid:   # 被引 ID → 原文的消息 ID
+                return idx - j
     # quote_wx 已在 _common 层降级处理; 此处文本兜底与云端一致
     tm = re.search(r'<title>([^<]+)</title>', x) or re.search(r'chatroom:\s*([^\[]{12,80})', x)
     if not tm: return None
     key = re.sub(r'(\[[^\]]{1,8}\])|(@[^\s]{2,20}\s*)|(\s+)', '', tm.group(1))[:20]
-    for j in range(idx-1, max(0, idx-35), -1):
+    for j in range(idx-1, max(-1, idx-36), -1):
         jk = re.sub(r'(\[[^\]]{1,8}\])|(@[^\s]{2,20}\s*)|(\s+)', '', rows[j][1])[:20]
         if key[:12] and jk.startswith(key[:12]):
             return idx - j
@@ -90,7 +92,7 @@ def main():
         print(f"═══ {a.person[:12]} @ {a.group} 第{a.turn}/{len(ts)}回合 [{t[0]}..{t[1]}] 窗口[{lo}..{hi-1}] ═══")
         for j in range(lo, hi):
             mark = '◆' if t[0] <= j <= t[1] else '·'
-            s, x, tm, _, _ = rows[j]
+            s, x, tm, _, _, _ = rows[j]
             print(f"{mark}[{j:4d}|{tm[5:16]}|{s[:10]:<11}] {(x or '')[:95]}")
         return
     tl = sorted(t[1]-t[0]+1 for t in ts)

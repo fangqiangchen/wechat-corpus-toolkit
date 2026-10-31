@@ -30,7 +30,7 @@ with open(a.out, 'w', encoding='utf-8') as f:
     for lo, hi, tnos in spans:
         f.write(f"═══ 段[回合{tnos[0]}..{tnos[-1]}] 消息[{lo}..{hi-1}] ═══\n")
         for j in range(lo, hi):
-            s, x, tm, _, _ = rows[j]
+            s, x, tm, _, _, _ = rows[j]
             f.write(f" [{j:4d}|{tm[5:16]}|{s[:10]:<11}] {(x or '')[:95]}\n")
         f.write("\n")
 print(f"{a.out}: {len(ts)}回合→{len(spans)}段, {os.path.getsize(a.out)} bytes", flush=True)

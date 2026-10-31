@@ -12,7 +12,7 @@ SOURCE_EXTENSIONS = {".py", ".md", ".sh", ".ps1", ".js", ".yaml"}
 RUNTIME_TOP_LEVEL = {
     "LICENSE",
     "README.md",
-    "README_ZH.md",
+    "docs/upstream-README_ZH.md",
     "SKILL.md",
     "appmsg.py",
     "config.py",

@@ -1,7 +1,8 @@
 import importlib.util
 import os
 from pathlib import Path
-from types import SimpleNamespace
+
+import pytest
 
 
 DOCTOR_PATH = Path(__file__).parents[1] / "scripts" / "common" / "doctor.py"
@@ -26,53 +27,51 @@ def test_key_check_warns_on_broad_posix_permissions(tmp_path):
     path = tmp_path / "key.txt"
     path.write_text("ab" * 32, encoding="ascii")
     path.chmod(0o644)
-    check = doctor._key_check(str(path), "reference.md", check_permissions=True)
+    check = doctor._key_check(str(path))
     assert check.status == "warn"
     assert "0644" in check.detail
     assert "ab" * 32 not in check.detail
 
     path.chmod(0o600)
-    check = doctor._key_check(str(path), "reference.md", check_permissions=True)
+    check = doctor._key_check(str(path))
     assert check.status == "ok"
 
 
-def test_unsupported_platform_stops_platform_checks(monkeypatch, tmp_path):
-    monkeypatch.setattr(doctor, "_codex_mcp_check", lambda _path: doctor.Check("mcp", "warn", "none"))
-    monkeypatch.setattr(doctor, "_skill_discovery_check", lambda _path: doctor.Check("skill", "warn", "none"))
-    checks = doctor.collect_checks(system="Linux", skill_dir=str(tmp_path))
-    assert [item.name for item in checks] == ["platform", "python", "skill", "mcp"]
-    assert checks[0].status == "fail"
+@pytest.mark.parametrize("system,status", [("Linux", "fail"), ("Darwin", "warn")])
+def test_non_windows_stops_before_local_discovery(monkeypatch, tmp_path, system, status):
+    def unexpected_discovery():
+        pytest.fail("Non-Windows diagnostics should not discover local accounts")
+
+    monkeypatch.setattr(doctor, "_config_module", unexpected_discovery)
+    checks = doctor.collect_checks(system=system, skill_dir=str(tmp_path))
+    assert [item.name for item in checks] == ["platform", "python"]
+    assert checks[0].status == status
 
 
-def test_voice_backend_is_optional_and_platform_specific(monkeypatch):
-    monkeypatch.setattr(doctor, "_has_module", lambda name: name == "mlx_whisper")
-
-    mac = doctor._voice_backend_check("Darwin")
-    windows = doctor._voice_backend_check("Windows")
-
-    assert mac.status == "ok"
-    assert "mlx-whisper" in mac.detail
-    assert windows.status == "warn"
-    assert "-WithVoice" in windows.fix
+@pytest.fixture
+def windows_diagnostics(monkeypatch):
+    monkeypatch.setattr(doctor, "_config_module", lambda: None)
+    monkeypatch.setattr(doctor, "_has_module", lambda *names: True)
 
 
-def test_mac_key_database_check_accepts_one_readable_database(monkeypatch, tmp_path):
-    data_dir = tmp_path / "account" / "db_storage"
+def test_windows_database_check_accepts_nonzero_shard(windows_diagnostics, tmp_path):
+    data_dir = tmp_path / "decrypted" / "account" / "db_storage"
     message_dir = data_dir / "message"
     message_dir.mkdir(parents=True)
     (message_dir / "message_3.db").write_bytes(b"database")
-    monkeypatch.setattr(
-        doctor.subprocess,
-        "run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=0),
-    )
-
-    check = doctor._mac_key_database_check(str(tmp_path), [str(data_dir)])
-
-    assert check.status == "ok"
+    checks = {c.name: c for c in doctor.collect_checks(system="Windows", skill_dir=str(tmp_path))}
+    assert checks["database"].status == "ok"
+    assert checks["key"].status == "fail"
 
 
-def test_mac_key_database_check_fails_without_message_database(tmp_path):
-    check = doctor._mac_key_database_check(str(tmp_path), [str(tmp_path)])
+def test_windows_database_check_fails_without_shards(windows_diagnostics, tmp_path):
+    checks = {c.name: c for c in doctor.collect_checks(system="Windows", skill_dir=str(tmp_path))}
+    assert checks["database"].status == "fail"
 
-    assert check.status == "fail"
+
+def test_windows_missing_decompressor_is_reported(windows_diagnostics, monkeypatch, tmp_path):
+    monkeypatch.setattr(doctor, "_has_module", lambda *names: names in [("frida",), ("Crypto",)])
+    checks = {c.name: c for c in doctor.collect_checks(system="Windows", skill_dir=str(tmp_path))}
+    assert checks["dependency:frida"].status == "ok"
+    assert checks["dependency:pycryptodome"].status == "ok"
+    assert checks["dependency:zstd"].status == "warn"

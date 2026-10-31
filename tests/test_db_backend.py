@@ -107,9 +107,8 @@ def test_encrypted_data_discovery_validates_nonzero_message_shard(monkeypatch, t
     monkeypatch.setattr(config, "DB_BACKEND", "sqlcipher", raising=False)
     monkeypatch.setattr(
         config,
-        "WECHAT_DATA_GLOB",
-        str(tmp_path / "*" / "db_storage"),
-        raising=False,
+        "data_globs",
+        lambda: [str(tmp_path / "*" / "db_storage")],
     )
     monkeypatch.setattr(crypto, "load_key", lambda: "11" * 32)
     monkeypatch.setattr(db, "test_key", lambda _key, path: path == str(shard))

@@ -11,13 +11,14 @@
   wx_membership  成员全量表（F4: 沉默者分母, 含从未发言者; chat_type 区分群/私聊）
 
 会话类型: chat_type = group(群, 分母=全体成员) | private(私聊, 分母=对手方1人)。
-既有库通过 migrate() 自动 ALTER 补列; --rebuild 则整库重建。
-默认幂等: 先清空数据表再重灌(重复运行不会翻倍); --append 保留旧行(特殊场景)。
+既有库通过 migrate() 自动 ALTER 补列; --rebuild 则重建六张表。
+默认幂等: 重灌派生表并保留 wx_verify 人工核验记录; --append 保留旧行。
+建库在单一事务内完成，任一步失败都回滚到原有数据。
 
 用法
 ----
   python wxlocal/build_db21.py              # 幂等重灌（默认，安全）
-  python wxlocal/build_db21.py --rebuild    # 删库重建（最彻底）
+  python wxlocal/build_db21.py --rebuild    # 重建六张表（含核验记录）
   python wxlocal/build_db21.py --append      # 保留旧行（特殊场景，会翻倍，慎用）
 
 ⚠ 以前这个脚本**没有 argparse**：`--help` / 任何拼错的参数都会被当成"正常运行"，
@@ -25,6 +26,7 @@
 未知参数报错退出、不改库；`-h/--help` 只打印帮助。
 """
 import argparse
+from contextlib import closing
 import os, sys, json, sqlite3, hashlib, re, glob
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -147,25 +149,33 @@ def load_exports():
 
 
 def main(rebuild=False, append=False):
-    if rebuild and os.path.exists(DB_PATH):
-        os.remove(DB_PATH)
-    con = sqlite3.connect(DB_PATH)
-    con.executescript(SQL_SCHEMA)
-    con.execute("PRAGMA journal_mode=WAL")
-    mig = migrate(con)
-    if mig:
-        print(f"  库迁移: 新增列 {', '.join(mig)}", flush=True)
+    files, cards, memb = load_exports()
+    tables = ("wx_messages", "wx_coref", "wx_edges", "wx_profile_features",
+              "wx_verify", "wx_membership")
+    with closing(sqlite3.connect(DB_PATH)) as con, con:
+        con.execute("PRAGMA journal_mode=WAL")
+        # executescript 会隐式提交已有事务，故 BEGIN 必须置于脚本内部。
+        # 重建也使用事务内 DROP，避免提前删库导致失败时丢失旧数据。
+        drops = "".join(f"DROP TABLE IF EXISTS {t};\n" for t in tables) if rebuild else ""
+        con.executescript("BEGIN IMMEDIATE;\n" + drops + SQL_SCHEMA)
+        mig = migrate(con)
+        if mig:
+            print(f"  库迁移: 新增列 {', '.join(mig)}", flush=True)
+        stats = populate(con, files, cards, memb, append)
+    print(json.dumps(stats, ensure_ascii=False, indent=2))
+    print(f"\n库: {DB_PATH}")
+
+
+def populate(con, files, cards, memb, append):
     if not append:
         # 默认: 先清空数据表再重灌(幂等)。build_db21 每次都读**全部**导出文件,
         # 追加会让重复运行静默翻倍, 故默认必须清。
         # --append 仅供特殊场景(如手工补灌单批)。
         for _t in ("wx_messages", "wx_coref", "wx_edges", "wx_profile_features",
-                   "wx_verify", "wx_membership"):
+                   "wx_membership"):
             con.execute(f"DELETE FROM {_t}")
-        con.commit()
-        print("  已清空数据表(幂等重灌; --append 保留旧行)", flush=True)
+        print("  重灌派生表(保留核验记录; 失败回滚; --append 保留旧行)", flush=True)
 
-    files, cards, memb = load_exports()
     # 归一化 key: 统一剥 wx_ 前缀（collect 的 key 带前缀，库内 chat_raw 不带）
     def norm(k):
         return k[3:] if k.startswith("wx_") else k
@@ -265,7 +275,6 @@ def main(rebuild=False, append=False):
                 (slug, info.get("display", ""), wx, mm["name"], mtype,
                  1 if wx in spoke_wxids else 0,
                  cards_map.get(wx)))
-    con.commit()
 
     # ── 人工确认的别名归并(v6.2): identities.json aliases ──
     # 别名wxid → 主号wxid: sender_wxid 改写 + sender_full 统一为主号的消息主名 + 孪生成员行去重
@@ -376,7 +385,6 @@ def main(rebuild=False, append=False):
                     "VALUES(?,?,?,?,?,?,?)",
                     (src_name, dst_name, "at", 1, chat, ts_iso, ts_iso))
             n_edges += 1
-    con.commit()
 
     # ── 汇总 ──
     by_type = {}
@@ -398,9 +406,7 @@ def main(rebuild=False, append=False):
             "SELECT COUNT(*) FROM wx_messages WHERE sender_wxid != '' "
             "AND text LIKE sender_wxid || ':%'").fetchone()[0],
     }
-    con.close()
-    print(json.dumps(stats, ensure_ascii=False, indent=2))
-    print(f"\n库: {DB_PATH}")
+    return stats
 
 
 def build_argparser():
@@ -408,11 +414,11 @@ def build_argparser():
     ap = argparse.ArgumentParser(
         prog="build_db21.py",
         description="wxexport/2.1 exports → 本地 wxbase.db（六表）。默认幂等重灌。",
-        epilog="默认(无参数)会先清空六张数据表再重灌；--rebuild 连库文件一起重建。",
+        epilog="默认重灌派生表并保留核验记录；--rebuild 重建六张表。失败均回滚。",
     )
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--rebuild", action="store_true",
-                   help="删除 wxbase.db 后整库重建（最彻底；会丢失库内手工数据）")
+                   help="在事务内重建六张表（成功后会清空库内手工核验数据）")
     g.add_argument("--append", action="store_true",
                    help="保留旧行不清理（特殊场景；重复运行会让条数翻倍，慎用）")
     return ap
